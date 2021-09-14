@@ -6,13 +6,15 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 import sys
-from socket import socket
+import socket
 import socketserver
+import pprint
 from typing import List, Tuple
 
 
 import numpy as np
 
+pp = pprint.PrettyPrinter(indent=2)
 
 BITMAP_SIZ = 1 << 16  # 64k bitmap
 # BUFFER_SIZ_LEN = 32
@@ -22,7 +24,7 @@ INPUT_SIZ_LEN = 4  # length of the current input
 
 def get_model(input_size: int, bitmap_size: int, name: str = None):
     """ create a model """
-    SHRINK_FACTOR = 3
+    SHRINK_FACTOR = 5
     output_size = bitmap_size
     dense_layer_size = output_size // SHRINK_FACTOR
     inputs = keras.Input(shape=(input_size,))
@@ -32,7 +34,7 @@ def get_model(input_size: int, bitmap_size: int, name: str = None):
     x = dense_2(x)
     dense_3 = layers.Dense(output_size, activation="sigmoid")
     outputs = dense_3(x)
-    return keras.Model(inputs=input, outputs=outputs, name=name)
+    return keras.Model(inputs=inputs, outputs=outputs, name=name)
 
 
 def compile_model(model: keras.Model):
@@ -76,7 +78,6 @@ class IOMixin:
 
     def read_mode(self):
         mode = self._read_int(1)
-        dprint(mode)
         return mode
 
     def is_sample(self):
@@ -102,8 +103,8 @@ class IOMixin:
 
     def read_input(self) -> np.ndarray:
         input_size = self.read_input_size()
-        # dprint(input_size)
-        return self._read_ndarray(input_size, np.byte)
+        data = self._read_ndarray(input_size, np.byte)
+        return data
 
     def read_sample(self) -> Tuple[np.ndarray, np.ndarray]:
         input_ = self.read_input()
@@ -113,6 +114,7 @@ class IOMixin:
     def write_filter_result(self, filter_out: bool):
         data = b'\x01' if filter_out else b'\x00'
         self.request.send(data)
+        # print("result-done")
 
 
 class Filter:
@@ -206,6 +208,9 @@ class Filter:
         """
         whether we need to fit the model against the observed sample
         """
+        self._compress_sample_bitmap()
+        self._calc_sample_score()
+
         if self.model_trained_sample_count < self.MIN_TRAINING_SAMPLES:
             return True
 
@@ -214,8 +219,6 @@ class Filter:
             # initially model's max and min score are set to -1 and 1
             return True
 
-        self._compress_sample_bitmap()
-        self._calc_sample_score()
         avg_score = np.mean(self.samples_score)
         # if avg_score < self.model_train_min_score + model_train_score_span * 0.2:
         #     return True
@@ -307,12 +310,16 @@ class Filter:
 
         if not self.model or self.need_new_model:
             self.create_new_model()
-            dprint(self.model)
+            self.dprint("Update/Create new model.")
+            self.dprint(self.model)
 
         # compress the bitmap according to the current model
         self._compress_sample_bitmap()
         if self.need_fit:
-            self.model.fit(x=self.samples_X, y=self.samples_Y_compressed, epochs=5)
+            # _, ncol = self.samples_X.shape
+            # if ncol < self.model_input_size:
+            #     samples_X = np.pad
+            self.model.fit(x=self.samples_X, y=self.samples_Y_compressed, epochs=3)
             self.model_trained_sample_count += self.sample_size
             self.model_train_max_score = max(self.model_train_max_score, np.max(self.samples_score))
             self.model_train_min_score = min(self.model_train_min_score, np.min(self.samples_score))
@@ -338,8 +345,8 @@ class Filter:
 
         self.samples_X.append(x)
         self.samples_Y.append(y)
-        dprint("observe")
         if self.sample_size >= self.epoch_sample_size:
+            self.dprint("collect a whole batch of samples")
             self.fit_samples()
 
     # --------------------------- helper functions ------------------------------
@@ -352,9 +359,10 @@ class Filter:
 
     def _cast_samples(self):
         """ cast samples to ndarray """
-        if not isinstance(self.samples_X, np.ndarray):
-            self.samples_X = np.array(self.samples_X)
-            self.samples_Y = np.array(self.samples_Y)
+        if not isinstance(self.samples_X, list):
+            return
+        self.samples_X = np.array([np.concatenate((x, np.zeros(self.model_input_size - x.size))) for x in self.samples_X])
+        self.samples_Y = np.array(self.samples_Y)
 
     def _compress_sample_bitmap(self):
         if self.samples_Y_compressed is not None:
@@ -370,9 +378,9 @@ class Filter:
         self.samples_score = self.calc_score(self.samples_Y_compressed, self.model_edge_score)
 
     def _update_edge_score(self):
-        weight = self.sample_size / self.edge_score_sample_count
-        score = self.sample_edge_score * weight
-        np.add(self.edge_score, score, out=self.edge_score)
+        weight = self.sample_size / (self.edge_score_sample_count + self.sample_size)
+        # score = self.sample_edge_score * weight
+        np.add(self.edge_score * (1-weight), self.sample_edge_score * weight, out=self.edge_score)
         np.divide(self.edge_score, np.linalg.norm(self.edge_score), out=self.edge_score)
         self.edge_score_sample_count += self.sample_size
 
@@ -393,7 +401,7 @@ class Filter:
             np.logical_xor(hit, self.virgin_flag, out=self.virgin_flag)
             # update new_observed_edge_index
             self.new_observed_edge_index = np.concatenate(
-                self.new_observed_edge_index, new_hit_edge_idx
+                (self.new_observed_edge_index, new_hit_edge_idx)
             )
 
         return new_hit_edge_idx
@@ -429,25 +437,32 @@ class Filter:
         self.edge_score = np.zeros_like(self.model_edge_score)
         self.edge_score_sample_count = 0
 
+    @staticmethod
+    def dprint(*args):
+        for obj in args:
+            dprint(obj)
+
 
 class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
 
     def handle(self):
         dprint("fuzzer connected")
         Filter.__init__(self)
-        seen_sample, seen_test = False, False
+        # seen_sample, seen_test = False, False
         while True:
+            # bts = self.request.recv(4, socket.MSG_PEEK)
+            # print(f"bytes: {bts, len(bts)}")
             is_sample = self.read_mode()
             if is_sample:
-                if not seen_sample:
-                    dprint("read sample")
-                    seen_sample = True
+                # if not seen_sample:
+                    # dprint("read sample")
+                #     seen_sample = True
                 input_, bitmap = self.read_sample()
                 self.observe(input_, bitmap)
             else:
-                if not seen_test:
-                    dprint("read test")
-                    seen_test = True
+                # if not seen_test:
+                #     dprint("read test")
+                #     seen_test = True
                 # do a filter
                 self.filter_one()
 
@@ -461,8 +476,15 @@ class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
         if self.is_oversize(x):
             self.write_filter_result(False)  # fuzz the input
             return
-        y_hat = self.predict(x)
+        x = np.concatenate((x, np.zeros(self.model_input_size-x.size)))
+        # # if x.size != self.model_input_size:
+        # import pdb
+        # pdb.set_trace()
+        
+        y_hat = self.predict(np.reshape(x, (1, -1)))
         score = self.calc_score(y_hat, self.edge_score)
+        self.write_filter_result(False)  # fuzz the input
+        return
         if score < 0:
             self.write_filter_result(False)  # fuzz the input
             return
@@ -470,7 +492,7 @@ class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
         if roll > min(score, 0.95):
             self.write_filter_result(False)  # fuzz the input
         else:
-            dprint("filter out 1")
+            # dprint("filter out 1")
             self.filter_count += 1
             if self.filter_count % 10000 == 0:
                 dprint(f"filtered {self.filter_count} samples")
@@ -479,5 +501,8 @@ class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
 
 if __name__ == "__main__":
     SOCK = "/tmp/afl-mlfilter.sock"
+    import os
+    if os.path.exists(SOCK):
+        os.remove(SOCK)
     with socketserver.UnixStreamServer(SOCK, Handler) as server:
         server.serve_forever()

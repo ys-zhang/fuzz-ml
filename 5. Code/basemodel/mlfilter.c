@@ -10,6 +10,8 @@
 
 u8 *bitmap_store;
 
+u8 filter_on = 1;
+
 int sockfd; // file descriptor for the unix stream socket
 
 // write bytes to the socket
@@ -95,29 +97,16 @@ void filter_sock_close()
   SAYF("filter socket closed");
 }
 
-void filter_start_train()
-{
-  // in_training = 1;
-}
-
-void filter_start_filter()
-{
-  // in_training = 0;
-}
-
-const u8 in_sample = 1;
-const u8 in_test   = 0;
-
 inline void filter_feed_sample(u8 *input, u32 input_size, u8 *bitmap)
 {
   // if (!in_training) return;
   
   memcpy(bitmap_store, bitmap, MAP_SIZE);
-
+  u8 mode = 1;
   // indicates training mode
-  Write(&in_sample, sizeof(u8));
+  Write(&mode, sizeof(mode));
   // write input size
-  Write(&input_size, sizeof(u32));
+  Write(&input_size, sizeof(input_size));
   // write input
   Write(input, input_size * sizeof(u8));
   // write bitmap
@@ -127,12 +116,11 @@ inline void filter_feed_sample(u8 *input, u32 input_size, u8 *bitmap)
 // whether skip the input
 inline u8 filter_one(u8 *input, u32 input_size)
 {
-  // if (in_training) return 0;
-
+  u8 mode = 0;
   // indicates in filtering mode
-  Write(&in_test, sizeof(u8));
+  Write(&mode, sizeof mode);
   // write input size
-  Write(&input_size, sizeof(u32));
+  Write(&input_size, sizeof input_size);
   // write input
   Write(input, input_size * sizeof(u8));
   return Read_filter_result();

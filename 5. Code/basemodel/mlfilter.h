@@ -16,7 +16,7 @@
 #define FILTER_SOCK "/tmp/afl-mlfilter.sock"
 
 
-u8 filter_on = 1;
+u8 filter_on;
 
 void filter_sock_setup();
 void filter_sock_close();
@@ -52,9 +52,5 @@ void free_chan_unsafe(struct channel* chan);
 
 s32 read_chan(struct channel *chan, u8 *out);
 u8 write_chan(struct channel *chan, u8 *in, s32 in_len);
-
-
-// TODO: just include the definations
-#include "mlfilter.c"
 
 #endif

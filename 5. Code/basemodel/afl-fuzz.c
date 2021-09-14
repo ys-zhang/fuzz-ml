@@ -7174,7 +7174,7 @@ EXP_ST void setup_dirs_fds(void) {
 
   if (mkdir(out_dir, 0700)) {
 
-    if (errno != EEXIST) PFATAL("Unable to create '%s'", out_dir);
+    if (errno != EEXIST) PFATAL("Unable to create '%s', errorno '%i'", out_dir, errno);
 
     maybe_delete_out_dir();
 
