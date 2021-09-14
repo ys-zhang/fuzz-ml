@@ -8,11 +8,17 @@
 #include "unistd.h"
 
 
-u8 *bitmap_store;
+#define CHAN_SIZE 200  // size of the filter channel
 
-u8 filter_on = 1;
+u8 *bitmap_store;
+extern u8* trace_bits;
+static struct channel filter_chan;
 
 int sockfd; // file descriptor for the unix stream socket
+
+u8 filter_mode = FILTER_MODE_ONE;
+
+//  ===================  network ========================
 
 // write bytes to the socket
 inline void Write(void *buf, size_t len)
@@ -83,6 +89,7 @@ void filter_sock_setup()
   SAYF("filter socket connected");
 }
 
+
 void filter_sock_close()
 {
   u32 flag = 0;
@@ -96,6 +103,7 @@ void filter_sock_close()
   }
   SAYF("filter socket closed");
 }
+
 
 inline void filter_feed_sample(u8 *input, u32 input_size, u8 *bitmap)
 {
@@ -113,6 +121,7 @@ inline void filter_feed_sample(u8 *input, u32 input_size, u8 *bitmap)
   Write(bitmap_store, MAP_SIZE * sizeof(u8));
 }
 
+
 // whether skip the input
 inline u8 filter_one(u8 *input, u32 input_size)
 {
@@ -127,11 +136,11 @@ inline u8 filter_one(u8 *input, u32 input_size)
 }
 
 
-u8 new_chan(s32 len, struct channel *chan)
+// ========================== channel =======================
+
+
+u8 init_chan(s32 len, struct channel *chan)
 {
-  if (chan) return 1; 
-  chan = (struct channel *) ck_alloc(sizeof(struct channel));
-  if (!chan) return 2;
   chan->len = len+1;
   chan->head_idx = 0;
   chan->tail_idx = 0;
@@ -153,11 +162,12 @@ void free_chan_unsafe(struct channel *chan)
     ck_free(chan->buffer[i]);
   }
   ck_free(chan->buffer);
-  ck_free(chan);
+  // ck_free(chan);
 }
 
 
-u8 write_chan(struct channel *chan, u8 *in, s32 in_len) 
+// the input is copied
+u8 write_to_chan(struct channel *chan, u8 *in, s32 in_len) 
 {
   if (!chan) return 1;
   lock(&chan->mutex);
@@ -174,14 +184,13 @@ u8 write_chan(struct channel *chan, u8 *in, s32 in_len)
     
     elem->len = in_len;
     elem->input = ck_alloc(in_len * sizeof(u8));
-  }
-
-  if (elem->len != in_len) {
-    ck_free(elem->input);
+  } else {
+    if (elem->len < in_len) {
+      // ck_free(elem->input);
+      elem->input = ck_realloc(elem->input, in_len * sizeof(u8)); 
+    } 
     elem->len = in_len;
-    elem->input = ck_alloc(in_len * sizeof(u8)); 
-  } 
-
+  }
   memcpy(elem->input, in, in_len);
   if (chan->head_idx == chan->tail_idx) {
     // before written, the channel is empty
@@ -192,7 +201,7 @@ u8 write_chan(struct channel *chan, u8 *in, s32 in_len)
   return 0;
 }
 
-s32 read_chan(struct channel *chan, u8 *out)
+s32 read_from_chan(struct channel *chan, u8 *out)
 {
   if (!chan) return 0;
   lock(&chan->mutex);
@@ -210,4 +219,53 @@ s32 read_chan(struct channel *chan, u8 *out)
   unlock(&chan->mutex);
   return elem->len;
 }
+
+
+void chan_setup()
+{
+  if (init_chan(200, &filter_chan)) 
+    FATAL("failted init filter channel.");
+}
+
+
+void chan_clear()
+{
+  free_chan_unsafe(&filter_chan);
+}
+
+
+s32 read_chan(u8* output)
+{
+  return read_from_chan(&filter_chan, output);
+}
+
+
+void write_chan(u8* input, s32 input_len)
+{
+  if(write_to_chan(&filter_chan, input, input_len))
+    FATAL("FAIL WRITE TO FILTER CHANNEL");
+}
+
+
+void filter_add(u8* input, u32 input_size)
+{
+
+}
+
+
+
+ 
+
+// void run_fuzzing(char** argv)
+// {
+//   s32 len;
+//   u8* input;
+//   // u8* bitmap;
+//   while (1) {
+//     len = read_chan(input);
+//     // common_fuzz_stuff return 1 if needs to abandon the entry
+//     if (common_fuzz_stuff(argv, input, len)) continue;
+//     filter_feed_sample(input, len, trace_bits);
+//   }
+// }
 

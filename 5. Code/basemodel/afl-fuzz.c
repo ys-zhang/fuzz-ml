@@ -4662,7 +4662,8 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
 
   }
 
-  if (filter_on && filter_one(out_buf, len)) {
+  if (filter_mode == FILTER_MODE_ONE && filter_one(out_buf, len)) {
+    total_execs++; // if not filtered out total execs is added in run_target
     return 0;   // input filtered out
   }
 
@@ -4699,7 +4700,7 @@ EXP_ST u8 common_fuzz_stuff(char** argv, u8* out_buf, u32 len) {
   if (!(stage_cur % stats_update_freq) || stage_cur + 1 == stage_max)
     show_stats();
 
-  if (filter_on) {
+  if (filter_mode == FILTER_MODE_ONE) {
     filter_feed_sample(out_buf, len, trace_bits);
   }
 
@@ -5195,8 +5196,9 @@ static u8 fuzz_one(char** argv) {
     stage_cur_byte = stage_cur >> 3;
 
     FLIP_BIT(out_buf, stage_cur);
-
-    if (common_fuzz_stuff(argv, out_buf, len)) goto abandon_entry;
+    if (common_fuzz_stuff(argv, out_buf, len)) {
+      goto abandon_entry;
+    }
 
     FLIP_BIT(out_buf, stage_cur);
 

@@ -293,7 +293,8 @@ class Filter:
         return model
 
     def predict(self, inputs: np.ndarray) -> np.ndarray:
-        return self.model.predict(inputs)
+        model = self.model
+        return model(inputs, training=False).numpy()
 
     @staticmethod
     def calc_score(y: np.ndarray, edge_score):
@@ -307,6 +308,7 @@ class Filter:
         # cast sample list to ndarray
         self._cast_samples()
         self._update_new_observed_edge_index()
+        self._update_sample_count()
 
         if not self.model or self.need_new_model:
             self.create_new_model()
@@ -315,6 +317,7 @@ class Filter:
 
         # compress the bitmap according to the current model
         self._compress_sample_bitmap()
+        self.print_filter_stat()
         if self.need_fit:
             # _, ncol = self.samples_X.shape
             # if ncol < self.model_input_size:
@@ -442,6 +445,13 @@ class Filter:
         for obj in args:
             dprint(obj)
 
+    def print_filter_stat(self):
+        print(f"model::{self.model_input_size}->{self.model_output_size}")
+        print(f"bitmap_cov_ratio: {self.model_sample_bitmap_coverage}")
+        print(f"new_obv_edge_sample_count/tot_sample_num: {self.new_observed_edge_sample_count}/{self.total_sample_count}")
+        print(f"oversize-ratio, sample-oversize-ratio:{self.model_oversize_input_ratio}, {self.model_oversize_input_sample_ratio}")
+        print(f"oversize-input-count: {self.oversize_input_count}")
+        print(f"filter_out: {self.filter_count}")
 
 class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
 
@@ -477,14 +487,11 @@ class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
             self.write_filter_result(False)  # fuzz the input
             return
         x = np.concatenate((x, np.zeros(self.model_input_size-x.size)))
-        # # if x.size != self.model_input_size:
-        # import pdb
-        # pdb.set_trace()
         
         y_hat = self.predict(np.reshape(x, (1, -1)))
         score = self.calc_score(y_hat, self.edge_score)
-        self.write_filter_result(False)  # fuzz the input
-        return
+        # self.write_filter_result(False)  # fuzz the input
+        # return
         if score < 0:
             self.write_filter_result(False)  # fuzz the input
             return
@@ -494,7 +501,7 @@ class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
         else:
             # dprint("filter out 1")
             self.filter_count += 1
-            if self.filter_count % 10000 == 0:
+            if self.filter_count % 100 == 0:
                 dprint(f"filtered {self.filter_count} samples")
             self.write_filter_result(True)   # skip the input
 
