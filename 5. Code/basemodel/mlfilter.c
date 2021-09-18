@@ -10,9 +10,10 @@
 
 #define CHAN_SIZE 200  // size of the filter channel
 
-u8 *bitmap_store;
-extern u8* trace_bits;
-static struct channel filter_chan;
+static u8 *bitmap_store;
+static chan_t filter_input_chan;
+static chan_t filter_sample_chan;
+static chan_t filter_output_chan;
 
 int sockfd; // file descriptor for the unix stream socket
 
@@ -38,19 +39,7 @@ inline u8 Read_filter_result()
   return rst;
 }
 
-inline void lock(pthread_mutex_t *mutex)
-{
-  int err_code = pthread_mutex_lock(mutex);
-  if (err_code) 
-    FATAL("failed locking: %i\n", err_code);
-}
 
-inline void unlock(pthread_mutex_t *mutex)
-{
-  int err_code = pthread_mutex_unlock(mutex);
-  if (err_code) 
-    FATAL("failed unlocking: %i\n", err_code);
-}
 
 inline void wait_cond(pthread_cond_t *cond, pthread_mutex_t *mutex)
 {
@@ -121,7 +110,6 @@ inline void filter_feed_sample(u8 *input, u32 input_size, u8 *bitmap)
   Write(bitmap_store, MAP_SIZE * sizeof(u8));
 }
 
-
 // whether skip the input
 inline u8 filter_one(u8 *input, u32 input_size)
 {
@@ -136,136 +124,22 @@ inline u8 filter_one(u8 *input, u32 input_size)
 }
 
 
-// ========================== channel =======================
-
-
-u8 init_chan(s32 len, struct channel *chan)
+static void run_filter_send()
 {
-  chan->len = len+1;
-  chan->head_idx = 0;
-  chan->tail_idx = 0;
-  chan->buffer = (struct channel_elem **) ck_alloc(chan->len * sizeof(struct channel_elem *));
-  pthread_mutex_init(&chan->mutex, NULL);
-  pthread_cond_init(&chan->cond, NULL);
-  return 0;
-}
-
-void free_chan_unsafe(struct channel *chan) 
-{
-  if (!chan) return;
-  pthread_mutex_destroy(&chan->mutex);
-  pthread_cond_destroy(&chan->cond);
-  for (s32 i=0; i<chan->len; i++) {
-    if (!chan->buffer[i]) continue;
-    if ((chan->buffer[i])->input) 
-      ck_free((chan->buffer[i])->input);
-    ck_free(chan->buffer[i]);
+  const u8 mode = 0;
+  input_elem_t data;
+  while(!filter_input_chan.closed) {
+    chan_recv(&filter_input_chan, &data);
+    Write(&mode, sizeof mode);
+    Write(&data.len, sizeof data.len);
+    Write(&data.data, data.len * sizeof(u8));
   }
-  ck_free(chan->buffer);
-  // ck_free(chan);
 }
 
-
-// the input is copied
-u8 write_to_chan(struct channel *chan, u8 *in, s32 in_len) 
+static void run_filter_recv()
 {
-  if (!chan) return 1;
-  lock(&chan->mutex);
-
-  while ((chan->tail_idx + 1) % chan->len == chan->head_idx) {
-    // channel is full
-    wait_cond(&chan->cond, &chan->mutex);
+  while (!filter_output_chan.closed)
+  {
+    /* code */
   }
-
-  struct channel_elem *elem = chan->buffer[chan->tail_idx];
-  
-  if (!elem) {
-    elem = ck_alloc(sizeof(struct channel_elem));
-    
-    elem->len = in_len;
-    elem->input = ck_alloc(in_len * sizeof(u8));
-  } else {
-    if (elem->len < in_len) {
-      // ck_free(elem->input);
-      elem->input = ck_realloc(elem->input, in_len * sizeof(u8)); 
-    } 
-    elem->len = in_len;
-  }
-  memcpy(elem->input, in, in_len);
-  if (chan->head_idx == chan->tail_idx) {
-    // before written, the channel is empty
-    cond_broadcast(&chan->cond);
-  }
-  chan->tail_idx = (chan->tail_idx + 1) % chan->len;
-  unlock(&chan->mutex);
-  return 0;
 }
-
-s32 read_from_chan(struct channel *chan, u8 *out)
-{
-  if (!chan) return 0;
-  lock(&chan->mutex);
-  while (chan->head_idx == chan->tail_idx) {
-    wait_cond(&chan->cond, &chan->mutex);
-  }
-  struct channel_elem *elem = chan->buffer[chan->head_idx];
-  if (!elem) return 0;
-  out = elem->input;
-  if ((chan->tail_idx + 1) % chan->len == chan->head_idx) {
-    // before reading the channel is full
-    cond_broadcast(&chan->cond);
-  }
-  chan->head_idx = (chan->head_idx + 1) % chan->len;
-  unlock(&chan->mutex);
-  return elem->len;
-}
-
-
-void chan_setup()
-{
-  if (init_chan(200, &filter_chan)) 
-    FATAL("failted init filter channel.");
-}
-
-
-void chan_clear()
-{
-  free_chan_unsafe(&filter_chan);
-}
-
-
-s32 read_chan(u8* output)
-{
-  return read_from_chan(&filter_chan, output);
-}
-
-
-void write_chan(u8* input, s32 input_len)
-{
-  if(write_to_chan(&filter_chan, input, input_len))
-    FATAL("FAIL WRITE TO FILTER CHANNEL");
-}
-
-
-void filter_add(u8* input, u32 input_size)
-{
-
-}
-
-
-
- 
-
-// void run_fuzzing(char** argv)
-// {
-//   s32 len;
-//   u8* input;
-//   // u8* bitmap;
-//   while (1) {
-//     len = read_chan(input);
-//     // common_fuzz_stuff return 1 if needs to abandon the entry
-//     if (common_fuzz_stuff(argv, input, len)) continue;
-//     filter_feed_sample(input, len, trace_bits);
-//   }
-// }
-

@@ -5,22 +5,17 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-import sys
-import socket
-import socketserver
+import queue
+
 import pprint
-from typing import List, Tuple
+from typing import List
 
 
 import numpy as np
 
+from utils import BITMAP_SIZ, dprint
+
 pp = pprint.PrettyPrinter(indent=2)
-
-BITMAP_SIZ = 1 << 16  # 64k bitmap
-# BUFFER_SIZ_LEN = 32
-ENDIAN = sys.byteorder
-INPUT_SIZ_LEN = 4  # length of the current input
-
 
 def get_model(input_size: int, bitmap_size: int, name: str = None):
     """ create a model """
@@ -54,67 +49,6 @@ def standardize(mat: np.ndarray) -> np.ndarray:
         return mat / np.linalg.norm(mat)
     else:
         raise NotImplementedError("too many dimensions")
-
-
-def dprint(obj):
-    """ debug print """
-    print(obj)
-
-
-class IOMixin:
-    request: socket  # inherited from socketserver as a mixin
-
-    def _read_int(self, nbytes: int) -> int:
-        """ read `nbytes` as an integer """
-        n = nbytes
-        rst = []
-        while n:
-            data = self.request.recv(n)  # type of self.request is `Socket`
-            n -= len(data)
-            rst.append(data)
-        raw = b"".join(rst)
-        size = int.from_bytes(raw, ENDIAN, signed=False)
-        return size
-
-    def read_mode(self):
-        mode = self._read_int(1)
-        return mode
-
-    def is_sample(self):
-        return self.read_mode() != 0
-
-    def _read_ndarray(self, size, dtype) -> np.ndarray:
-        n = size
-        bitmap = []
-        while n:
-            data = self.request.recv(n)
-            bitmap.append(data)
-            n -= len(data)
-        return np.frombuffer(b"".join(bitmap), dtype=dtype)
-
-    # def read_buffer_size(self) -> int:
-    #     return self._read_int(BUFFER_SIZ_LEN)
-
-    def read_input_size(self) -> int:
-        return self._read_int(INPUT_SIZ_LEN)
-
-    def read_bitmap(self) -> np.ndarray:
-        return self._read_ndarray(BITMAP_SIZ, np.uint8)
-
-    def read_input(self) -> np.ndarray:
-        input_size = self.read_input_size()
-        data = self._read_ndarray(input_size, np.byte)
-        return data
-
-    def read_sample(self) -> Tuple[np.ndarray, np.ndarray]:
-        input_ = self.read_input()
-        bitmap = self.read_bitmap()
-        return input_, bitmap
-
-    def write_filter_result(self, filter_out: bool):
-        data = b'\x01' if filter_out else b'\x00'
-        self.request.send(data)
-        # print("result-done")
 
 
 class Filter:
@@ -280,78 +214,6 @@ class Filter:
         """
         return self.sample_edge_score.dot(self.model_edge_score)
 
-    def create_new_model(self) -> keras.Model:
-        model_version = len(self._models) + 1
-        self._update_model_params()
-        model = get_model(
-            self.model_input_size,
-            self.model_output_size,
-            f"filter-ver-{model_version}",
-        )
-        compile_model(model)
-        self._models.append(model)
-        return model
-
-    def predict(self, inputs: np.ndarray) -> np.ndarray:
-        model = self.model
-        return model(inputs, training=False).numpy()
-
-    @staticmethod
-    def calc_score(y: np.ndarray, edge_score):
-        y = standardize(y)
-        return y.dot(edge_score)
-
-    def is_oversize(self, x):
-        return x.size > self.model_input_size
-
-    def fit_samples(self):
-        # cast sample list to ndarray
-        self._cast_samples()
-        self._update_new_observed_edge_index()
-        self._update_sample_count()
-
-        if not self.model or self.need_new_model:
-            self.create_new_model()
-            self.dprint("Update/Create new model.")
-            self.dprint(self.model)
-
-        # compress the bitmap according to the current model
-        self._compress_sample_bitmap()
-        self.print_filter_stat()
-        if self.need_fit:
-            # _, ncol = self.samples_X.shape
-            # if ncol < self.model_input_size:
-            #     samples_X = np.pad
-            self.model.fit(x=self.samples_X, y=self.samples_Y_compressed, epochs=3)
-            self.model_trained_sample_count += self.sample_size
-            self.model_train_max_score = max(self.model_train_max_score, np.max(self.samples_score))
-            self.model_train_min_score = min(self.model_train_min_score, np.min(self.samples_score))
-
-        # maintain edge statistics
-        # even not fit we update the edge_score i.e. weight
-        self._update_edge_score()
-        self._clear_samples()
-
-    def observe(self, x: np.ndarray, y: np.ndarray):
-        # observed an oversize input, throw away
-        if x.size > self.model_input_size:
-            # maintain model statistics
-            self.oversize_input_count += 1
-            self.longest_input_size = max(self.longest_input_size, x.size)
-            # since this sample is dropped, we check whether it hits uncovered edges
-            if np.any(np.delete(y, self.edge_selector)):
-                self.new_observed_edge_sample_count += 1
-            # maintain edge statistics
-            self.total_sample_count += 1
-            # TODO: update edge score here
-            return
-
-        self.samples_X.append(x)
-        self.samples_Y.append(y)
-        if self.sample_size >= self.epoch_sample_size:
-            self.dprint("collect a whole batch of samples")
-            self.fit_samples()
-
     # --------------------------- helper functions ------------------------------
 
     def _clear_samples(self):
@@ -373,6 +235,10 @@ class Filter:
         flag = np.greater(self.samples_Y[:, self.edge_selector],
                           0, dtype=np.float32)
         self.samples_Y_compressed = flag
+        self.samples_X = tf.keras.preprocessing.sequence.pad_sequences(
+            self.samples_X, maxlen=self.model_input_size, dtype=np.float32,
+            padding='post'
+        )
 
     def _calc_sample_score(self):
         if self.samples_score is not None:
@@ -440,11 +306,6 @@ class Filter:
         self.edge_score = np.zeros_like(self.model_edge_score)
         self.edge_score_sample_count = 0
 
-    @staticmethod
-    def dprint(*args):
-        for obj in args:
-            dprint(obj)
-
     def print_filter_stat(self):
         print(f"model::{self.model_input_size}->{self.model_output_size}")
         print(f"bitmap_cov_ratio: {self.model_sample_bitmap_coverage}")
@@ -453,39 +314,87 @@ class Filter:
         print(f"oversize-input-count: {self.oversize_input_count}")
         print(f"filter_out: {self.filter_count}")
 
-class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
+    def create_new_model(self) -> keras.Model:
+        model_version = len(self._models) + 1
+        self._update_model_params()
+        model = get_model(
+            self.model_input_size,
+            self.model_output_size,
+            f"filter-ver-{model_version}",
+        )
+        compile_model(model)
+        self._models.append(model)
+        return model
 
-    def handle(self):
-        dprint("fuzzer connected")
-        Filter.__init__(self)
-        # seen_sample, seen_test = False, False
-        while True:
-            # bts = self.request.recv(4, socket.MSG_PEEK)
-            # print(f"bytes: {bts, len(bts)}")
-            is_sample = self.read_mode()
-            if is_sample:
-                # if not seen_sample:
-                    # dprint("read sample")
-                #     seen_sample = True
-                input_, bitmap = self.read_sample()
-                self.observe(input_, bitmap)
-            else:
-                # if not seen_test:
-                #     dprint("read test")
-                #     seen_test = True
-                # do a filter
-                self.filter_one()
+    def predict(self, inputs: np.ndarray) -> np.ndarray:
+        model = self.model
+        return model(inputs, training=False).numpy()
 
-    def filter_one(self):
+    @staticmethod
+    def calc_score(y: np.ndarray, edge_score):
+        y = standardize(y)
+        return y.dot(edge_score)
+
+    def is_oversize(self, x):
+        return x.size > self.model_input_size
+
+    # ============================== main functions =====================================
+    def fit_samples(self):
+        # cast sample list to ndarray
+        self._cast_samples()
+        self._update_new_observed_edge_index()
+        self._update_sample_count()
+
+        if not self.model or self.need_new_model:
+            self.create_new_model()
+            dprint("Update/Create new model.")
+            dprint(self.model)
+
+        # compress the bitmap according to the current model
+        self._compress_sample_bitmap()
+        self.print_filter_stat()
+        if self.need_fit:
+            # _, ncol = self.samples_X.shape
+            # if ncol < self.model_input_size:
+            #     samples_X = np.pad
+            self.model.fit(x=self.samples_X, y=self.samples_Y_compressed, epochs=3)
+            self.model_trained_sample_count += self.sample_size
+            self.model_train_max_score = max(self.model_train_max_score, np.max(self.samples_score))
+            self.model_train_min_score = min(self.model_train_min_score, np.min(self.samples_score))
+
+        # maintain edge statistics
+        # even not fit we update the edge_score i.e. weight
+        self._update_edge_score()
+        self._clear_samples()
+
+    def observe(self, x: np.ndarray, y: np.ndarray):
+        # observed an oversize input, throw away
+        if x.size > self.model_input_size:
+            # maintain model statistics
+            self.oversize_input_count += 1
+            self.longest_input_size = max(self.longest_input_size, x.size)
+            # since this sample is dropped, we check whether it hits uncovered edges
+            if np.any(np.delete(y, self.edge_selector)):
+                self.new_observed_edge_sample_count += 1
+            # maintain edge statistics
+            self.total_sample_count += 1
+            # TODO: update edge score here
+            return
+
+        self.samples_X.append(x)
+        self.samples_Y.append(y)
+        if self.sample_size >= self.epoch_sample_size:
+            dprint("collect a whole batch of samples")
+            self.fit_samples()
+    
+    def filter_one(self, x):
+
         if not self.model_ready:
-            _ = self.read_input()            # discard input
-            self.write_filter_result(False)  # fuzz the input
-            return
+            return False 
 
-        x = self.read_input()
         if self.is_oversize(x):
-            self.write_filter_result(False)  # fuzz the input
-            return
+            return False  # fuzz the input
+        
         x = np.concatenate((x, np.zeros(self.model_input_size-x.size)))
         
         y_hat = self.predict(np.reshape(x, (1, -1)))
@@ -493,23 +402,11 @@ class Handler(socketserver.BaseRequestHandler, IOMixin, Filter):
         # self.write_filter_result(False)  # fuzz the input
         # return
         if score < 0:
-            self.write_filter_result(False)  # fuzz the input
-            return
+            return False  # fuzz the input
+            
         roll = random.uniform(0, 1)
         if roll > min(score, 0.95):
-            self.write_filter_result(False)  # fuzz the input
+            return False  # fuzz the input
         else:
-            # dprint("filter out 1")
             self.filter_count += 1
-            if self.filter_count % 100 == 0:
-                dprint(f"filtered {self.filter_count} samples")
-            self.write_filter_result(True)   # skip the input
-
-
-if __name__ == "__main__":
-    SOCK = "/tmp/afl-mlfilter.sock"
-    import os
-    if os.path.exists(SOCK):
-        os.remove(SOCK)
-    with socketserver.UnixStreamServer(SOCK, Handler) as server:
-        server.serve_forever()
+            return True   # skip the input

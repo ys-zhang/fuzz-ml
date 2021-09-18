@@ -1,0 +1,5 @@
+.vscode/**
+.idea/**
+model/**
+*.ipynb
+afl-fuzz
