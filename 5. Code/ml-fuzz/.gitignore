@@ -1,0 +1,10 @@
+.vscode/**
+.idea/**
+build/**
+mlfuzz/**
+example/**
+afl-output/**
+test/afl-output/**
+src/*.c
+src/afl/depre/*
+*/__pycache__/**
